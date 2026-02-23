@@ -22,12 +22,52 @@ $StripIsoTimestamp = $true
 
 function Remove-AnsiEscapes {
     param([string]$s)
+    $esc = [char]0x1b
     # Strip ESC [ ... m sequences (standard ANSI)
-    $s = $s -replace ("`x1b" + '\[[\d;]*m'), ''
+    $s = $s -replace ([regex]::Escape($esc) + '\[[\d;]*m'), ''
     # Strip [ ... m when stored as literal text (e.g. in pipeline logs)
-    # Use \[? to also catch corrupted ESC (when 0x1B becomes '[') leaving stray [[31m
     $s = $s -replace '\[?\[[\d;]*m', ''
     return $s
+}
+
+function Add-PlanColor {
+    param([string]$line)
+
+    $esc = [char]0x1b
+    $reset  = "${esc}[0m"
+    $green  = "${esc}[32m"
+    $red    = "${esc}[31m"
+    $yellow = "${esc}[33m"
+    $cyan   = "${esc}[36m"
+    $bold   = "${esc}[1m"
+
+    if ($line -match '^\s*#') {
+        if ($line -match 'will be created')        { return "$green$line$reset" }
+        if ($line -match 'will be destroyed')      { return "$red$line$reset" }
+        if ($line -match 'will be updated')        { return "$yellow$line$reset" }
+        if ($line -match 'must be replaced')       { return "$red$line$reset" }
+        if ($line -match 'will be read')           { return "$cyan$line$reset" }
+        return $line
+    }
+
+    if ($line -match '^Plan:') {
+        $result = $line
+        if ($result -match '(\d+ to add)')     { $result = $result.Replace($Matches[0], "${green}$($Matches[0])${reset}") }
+        if ($result -match '(\d+ to change)')  { $result = $result.Replace($Matches[0], "${yellow}$($Matches[0])${reset}") }
+        if ($result -match '(\d+ to destroy)') { $result = $result.Replace($Matches[0], "${red}$($Matches[0])${reset}") }
+        return "${bold}${result}${reset}"
+    }
+
+    if ($line -match 'No changes\.')               { return "${green}${line}${reset}" }
+
+    if ($line -match '^\s*-/\+')                   { return "$red$line$reset" }
+    if ($line -match '^\s*\+/-')                   { return "$yellow$line$reset" }
+    if ($line -match '^\s*\+')                     { return "$green$line$reset" }
+    if ($line -match '^\s*~')                      { return "$yellow$line$reset" }
+    if ($line -match '^\s*-')                      { return "$red$line$reset" }
+    if ($line -match '^\s*<=')                     { return "$cyan$line$reset" }
+
+    return $line
 }
 
 function Get-CleanedLine {
@@ -75,14 +115,14 @@ function Process-Line {
 
     # Detect plan end (summary or no-changes)
     if ($state -eq 'plan' -and ($cleaned -match 'Plan:.*(?:to add|to change|to destroy)' -or $cleaned -match 'No changes\. Your infrastructure')) {
-        Write-Host $cleaned
+        Write-Host (Add-PlanColor $cleaned)
         $script:state = 'footer'
         return
     }
 
     switch ($state) {
         'preamble' { [void]$pendingLines.Add($cleaned) }
-        'plan'    { Write-Host $cleaned }
+        'plan'    { Write-Host (Add-PlanColor $cleaned) }
         'footer'  { [void]$pendingLines.Add($cleaned) }
     }
 }
