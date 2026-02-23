@@ -84,32 +84,47 @@ function Get-CleanedLine {
 # Section states: preamble (foldable), plan (visible), footer (foldable)
 $state = 'preamble'
 $pendingLines = [System.Collections.Generic.List[string]]::new()
+$sectionCount = 0
 
-function Flush-Preamble {
-    if ($pendingLines.Count -gt 0) {
-        Write-Host '##[group]Terraform Refresh & Init'
-        foreach ($l in $pendingLines) { Write-Host $l }
-        Write-Host '##[endgroup]'
-        $pendingLines.Clear()
+function Get-SectionTitle {
+    param([System.Collections.Generic.List[string]]$lines)
+    foreach ($l in $lines) {
+        $trimmed = $l.Trim()
+        if ($trimmed -ne '' -and $trimmed -notmatch '^=+$') {
+            if ($trimmed.Length -gt 80) { $trimmed = $trimmed.Substring(0, 77) + '...' }
+            return $trimmed
+        }
     }
+    return $null
 }
 
-function Flush-Footer {
-    if ($pendingLines.Count -gt 0) {
-        Write-Host '##[group]Notes & Warnings'
-        foreach ($l in $pendingLines) { Write-Host $l }
-        Write-Host '##[endgroup]'
-        $pendingLines.Clear()
-    }
+function Flush-Section {
+    param([string]$FallbackTitle)
+    if ($pendingLines.Count -eq 0) { return }
+    $title = Get-SectionTitle $pendingLines
+    if (-not $title) { $title = $FallbackTitle }
+    $script:sectionCount++
+    Write-Host "##[group]$title"
+    foreach ($l in $pendingLines) { Write-Host $l }
+    Write-Host '##[endgroup]'
+    $pendingLines.Clear()
 }
 
 function Process-Line {
     param([string]$raw)
     $cleaned = Get-CleanedLine $raw
 
+    # Split preamble / footer into smaller groups at ====... separator lines
+    if (($state -eq 'preamble' -or $state -eq 'footer') -and $cleaned -match '^\s*={10,}\s*$') {
+        [void]$pendingLines.Add($cleaned)
+        $fallback = if ($state -eq 'preamble') { 'Terraform Setup' } else { 'Notes' }
+        Flush-Section -FallbackTitle $fallback
+        return
+    }
+
     # Detect plan start (real changes section) - only when still in preamble
     if ($state -eq 'preamble' -and ($cleaned -match 'Terraform used the selected providers|Terraform will perform the following actions')) {
-        Flush-Preamble
+        Flush-Section -FallbackTitle 'Terraform Init'
         $script:state = 'plan'
     }
 
@@ -137,5 +152,5 @@ if ($InputPath) {
     $input | ForEach-Object { Process-Line $_ }
 }
 
-if ($state -eq 'preamble') { Flush-Preamble }
-elseif ($state -eq 'footer') { Flush-Footer }
+if ($state -eq 'preamble') { Flush-Section -FallbackTitle 'Terraform Init' }
+elseif ($state -eq 'footer') { Flush-Section -FallbackTitle 'Notes & Warnings' }
