@@ -6,6 +6,12 @@ pool:
 
 steps:
   - task: PowerShell@2
+    displayName: "Show original plan"
+    inputs:
+      targetType: 'inline'
+      script: |
+        Get-Content -Path '$(System.DefaultWorkingDirectory)/terraform-plan-formatter/tf3.log'
+  - task: PowerShell@2
     displayName: "Run Terraform Plan Formatter"
     inputs:
       filePath: '$(System.DefaultWorkingDirectory)/terraform-plan-formatter/terraform-plan-formatter.ps1'
