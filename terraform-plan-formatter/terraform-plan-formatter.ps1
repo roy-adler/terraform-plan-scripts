@@ -1,9 +1,10 @@
 # Terraform Plan Formatter (PowerShell version)
-# Reads Terraform plan log output and emits GitHub Actions ##[group] / ##[endgroup]
-# with leading timestamp and ANSI codes stripped for readability in CI.
+# Reads Terraform plan log output and emits Azure DevOps ##[group] / ##[endgroup]
+# collapsible sections for readability in CI.
 #
-# Structure: Terraform refresh/init and footer notes are foldable; the actual
-# plan (resource changes) is shown in full so you can focus on what matters.
+# Structure: Preamble (refresh/init) and footer (notes/warnings) are split into
+# collapsible sections at ====... separators. The plan itself is passed through
+# with original ANSI colors preserved so it looks identical to native terraform.
 
 param(
     [Parameter(Position = 0)]
@@ -30,55 +31,24 @@ function Remove-AnsiEscapes {
     return $s
 }
 
-function Add-PlanColor {
-    param([string]$line)
-
-    $esc = [char]0x1b
-    $reset  = "${esc}[0m"
-    $green  = "${esc}[32m"
-    $red    = "${esc}[31m"
-    $yellow = "${esc}[33m"
-    $cyan   = "${esc}[36m"
-    $bold   = "${esc}[1m"
-
-    if ($line -match '^\s*#') {
-        if ($line -match 'will be created')        { return "$green$line$reset" }
-        if ($line -match 'will be destroyed')      { return "$red$line$reset" }
-        if ($line -match 'will be updated')        { return "$yellow$line$reset" }
-        if ($line -match 'must be replaced')       { return "$red$line$reset" }
-        if ($line -match 'will be read')           { return "$cyan$line$reset" }
-        return $line
-    }
-
-    if ($line -match '^Plan:') {
-        $result = $line
-        if ($result -match '(\d+ to add)')     { $result = $result.Replace($Matches[0], "${green}$($Matches[0])${reset}") }
-        if ($result -match '(\d+ to change)')  { $result = $result.Replace($Matches[0], "${yellow}$($Matches[0])${reset}") }
-        if ($result -match '(\d+ to destroy)') { $result = $result.Replace($Matches[0], "${red}$($Matches[0])${reset}") }
-        return "${bold}${result}${reset}"
-    }
-
-    if ($line -match 'No changes\.')               { return "${green}${line}${reset}" }
-
-    if ($line -match '^\s*-/\+')                   { return "$red$line$reset" }
-    if ($line -match '^\s*\+/-')                   { return "$yellow$line$reset" }
-    if ($line -match '^\s*\+')                     { return "$green$line$reset" }
-    if ($line -match '^\s*~')                      { return "$yellow$line$reset" }
-    if ($line -match '^\s*-')                      { return "$red$line$reset" }
-    if ($line -match '^\s*<=')                     { return "$cyan$line$reset" }
-
-    return $line
-}
-
-function Get-CleanedLine {
+function Strip-Prefixes {
     param([string]$raw)
     if ($StripIsoTimestamp) {
         $raw = $raw -replace '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s*', ''
     }
-    $out = Remove-AnsiEscapes $raw
-    # Strip "HH:MM:SS.mmm STDOUT " prefix (from Azure DevOps / script output)
-    $out = $out -replace '^\d{1,2}:\d{2}:\d{2}\.\d+\s+STDOUT\s+', ''
-    return $out
+    $raw = $raw -replace '^\d{1,2}:\d{2}:\d{2}\.\d+\s+STDOUT\s+', ''
+    return $raw
+}
+
+function Get-CleanedLine {
+    param([string]$raw)
+    $out = Strip-Prefixes $raw
+    return Remove-AnsiEscapes $out
+}
+
+function Get-PlanLine {
+    param([string]$raw)
+    return Strip-Prefixes $raw
 }
 
 # Section states: preamble (foldable), plan (visible), footer (foldable)
@@ -130,14 +100,14 @@ function Process-Line {
 
     # Detect plan end (summary or no-changes)
     if ($state -eq 'plan' -and ($cleaned -match 'Plan:.*(?:to add|to change|to destroy)' -or $cleaned -match 'No changes\. Your infrastructure')) {
-        Write-Host (Add-PlanColor $cleaned)
+        Write-Host (Get-PlanLine $raw)
         $script:state = 'footer'
         return
     }
 
     switch ($state) {
         'preamble' { [void]$pendingLines.Add($cleaned) }
-        'plan'    { Write-Host (Add-PlanColor $cleaned) }
+        'plan'    { Write-Host (Get-PlanLine $raw) }
         'footer'  { [void]$pendingLines.Add($cleaned) }
     }
 }
