@@ -1,10 +1,11 @@
 # Terraform Plan Formatter (PowerShell version)
-# Reads Terraform plan log output and emits Azure DevOps ##[group] / ##[endgroup]
-# collapsible sections for readability in CI.
+# Wraps Terraform plan log output in Azure DevOps ##[group] / ##[endgroup]
+# collapsible sections. Lines are passed through verbatim — nothing is
+# modified, only group markers are injected.
 #
-# Structure: Preamble (refresh/init) and footer (notes/warnings) are split into
-# collapsible sections at ====... separators. The plan itself is passed through
-# with original ANSI colors preserved so it looks identical to native terraform.
+# Structure: Preamble (refresh/init) and footer (notes/warnings) are wrapped
+# in collapsible sections (split at ====... separators). The plan itself
+# (resource changes) is emitted as-is so you can focus on what matters.
 
 param(
     [Parameter(Position = 0)]
@@ -18,51 +19,28 @@ if ($args.Count -gt 1) {
 
 $InputPath = $LogFile
 
-# Set to $true to strip leading ISO timestamps for readability
-$StripIsoTimestamp = $true
-
-function Remove-AnsiEscapes {
+# Produce an ANSI/timestamp-free copy of a line for pattern matching only.
+# This is never used for output — only to detect state transitions reliably.
+function Get-MatchText {
     param([string]$s)
+    $s = $s -replace '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s*', ''
+    $s = $s -replace '^\d{1,2}:\d{2}:\d{2}\.\d+\s+STDOUT\s+', ''
     $esc = [char]0x1b
-    # Strip ESC [ ... m sequences (standard ANSI)
     $s = $s -replace ([regex]::Escape($esc) + '\[[\d;]*m'), ''
-    # Strip [ ... m when stored as literal text (e.g. in pipeline logs)
     $s = $s -replace '\[?\[[\d;]*m', ''
     return $s
 }
 
-function Strip-Prefixes {
-    param([string]$raw)
-    if ($StripIsoTimestamp) {
-        $raw = $raw -replace '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s*', ''
-    }
-    $raw = $raw -replace '^\d{1,2}:\d{2}:\d{2}\.\d+\s+STDOUT\s+', ''
-    return $raw
-}
-
-function Get-CleanedLine {
-    param([string]$raw)
-    $out = Strip-Prefixes $raw
-    return Remove-AnsiEscapes $out
-}
-
-function Get-PlanLine {
-    param([string]$raw)
-    return Strip-Prefixes $raw
-}
-
-# Section states: preamble (foldable), plan (visible), footer (foldable)
 $state = 'preamble'
 $pendingLines = [System.Collections.Generic.List[string]]::new()
-$sectionCount = 0
 
 function Get-SectionTitle {
     param([System.Collections.Generic.List[string]]$lines)
     foreach ($l in $lines) {
-        $trimmed = $l.Trim()
-        if ($trimmed -ne '' -and $trimmed -notmatch '^=+$') {
-            if ($trimmed.Length -gt 80) { $trimmed = $trimmed.Substring(0, 77) + '...' }
-            return $trimmed
+        $text = (Get-MatchText $l).Trim()
+        if ($text -ne '' -and $text -notmatch '^=+$') {
+            if ($text.Length -gt 80) { $text = $text.Substring(0, 77) + '...' }
+            return $text
         }
     }
     return $null
@@ -73,7 +51,6 @@ function Flush-Section {
     if ($pendingLines.Count -eq 0) { return }
     $title = Get-SectionTitle $pendingLines
     if (-not $title) { $title = $FallbackTitle }
-    $script:sectionCount++
     Write-Host "##[group]$title"
     foreach ($l in $pendingLines) { Write-Host $l }
     Write-Host '##[endgroup]'
@@ -82,33 +59,33 @@ function Flush-Section {
 
 function Process-Line {
     param([string]$raw)
-    $cleaned = Get-CleanedLine $raw
+    $match = Get-MatchText $raw
 
     # Split preamble / footer into smaller groups at ====... separator lines
-    if (($state -eq 'preamble' -or $state -eq 'footer') -and $cleaned -match '^\s*={10,}\s*$') {
-        [void]$pendingLines.Add($cleaned)
+    if (($state -eq 'preamble' -or $state -eq 'footer') -and $match -match '^\s*={10,}\s*$') {
+        [void]$pendingLines.Add($raw)
         $fallback = if ($state -eq 'preamble') { 'Terraform Setup' } else { 'Notes' }
         Flush-Section -FallbackTitle $fallback
         return
     }
 
-    # Detect plan start (real changes section) - only when still in preamble
-    if ($state -eq 'preamble' -and ($cleaned -match 'Terraform used the selected providers|Terraform will perform the following actions')) {
+    # Detect plan start — only when still in preamble
+    if ($state -eq 'preamble' -and ($match -match 'Terraform used the selected providers|Terraform will perform the following actions')) {
         Flush-Section -FallbackTitle 'Terraform Init'
         $script:state = 'plan'
     }
 
     # Detect plan end (summary or no-changes)
-    if ($state -eq 'plan' -and ($cleaned -match 'Plan:.*(?:to add|to change|to destroy)' -or $cleaned -match 'No changes\. Your infrastructure')) {
-        Write-Host (Get-PlanLine $raw)
+    if ($state -eq 'plan' -and ($match -match 'Plan:.*(?:to add|to change|to destroy)' -or $match -match 'No changes\. Your infrastructure')) {
+        Write-Host $raw
         $script:state = 'footer'
         return
     }
 
     switch ($state) {
-        'preamble' { [void]$pendingLines.Add($cleaned) }
-        'plan'    { Write-Host (Get-PlanLine $raw) }
-        'footer'  { [void]$pendingLines.Add($cleaned) }
+        'preamble' { [void]$pendingLines.Add($raw) }
+        'plan'     { Write-Host $raw }
+        'footer'   { [void]$pendingLines.Add($raw) }
     }
 }
 
