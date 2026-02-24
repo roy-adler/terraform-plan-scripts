@@ -101,28 +101,29 @@ if ($InputPath) {
         Write-Error "File not found: $InputPath"
         exit 1
     }
-    # Support binary/encoded files: detect BOM, use replacement fallback for invalid bytes
-    $stream = [System.IO.File]::OpenRead($InputPath)
+    # Reject ZIP/artifact bundles — this script expects the terraform plan LOG (stdout), not the .plan artifact
+    $fs = [System.IO.File]::OpenRead($InputPath)
     try {
-        $bom = New-Object byte[] 4
-        $read = $stream.Read($bom, 0, 4)
-        $enc = [System.Text.Encoding]::UTF8
-        $offset = 0
-        if ($read -ge 3 -and $bom[0] -eq 0xEF -and $bom[1] -eq 0xBB -and $bom[2] -eq 0xBF) {
-            $enc = [System.Text.Encoding]::UTF8
-            $offset = 3
-        } elseif ($read -ge 2 -and $bom[0] -eq 0xFF -and $bom[1] -eq 0xFE) {
-            $enc = [System.Text.Encoding]::Unicode
-            $offset = 2
-        } elseif ($read -ge 2 -and $bom[0] -eq 0xFE -and $bom[1] -eq 0xFF) {
-            $enc = [System.Text.Encoding]::BigEndianUnicode
-            $offset = 2
-        } else {
-            $offset = 0
-        }
-        $stream.Position = $offset
-        $enc = [System.Text.Encoding]::GetEncoding($enc.CodePage, $enc.EncoderFallback, [System.Text.DecoderReplacementFallback]::new('�'))
-        $reader = [System.IO.StreamReader]::new($stream, $enc, $false, 1024, $true)
+        $header = New-Object byte[] 2
+        $null = $fs.Read($header, 0, 2)
+    } finally { $fs.Dispose() }
+    if ($header[0] -eq 0x50 -and $header[1] -eq 0x4B) {
+        Write-Error @"
+This file appears to be a ZIP archive (pipeline artifact), not the Terraform plan log.
+
+This formatter expects the TEXT output from 'terraform plan' (the log you see in the browser),
+not the binary artifact (.plan, tfstate, etc.).
+
+Fix: Pass the plan log file. Capture it in your pipeline, e.g.:
+  terraform plan -out=tfplan 2>&1 | Tee-Object -FilePath plan.log
+  .\terraform-plan-formatter.ps1 plan.log
+"@
+        exit 1
+    }
+    # Support text and binary-coded files: StreamReader auto-detects BOM (UTF-8, UTF-16, etc.)
+    # Fallback: if encoding errors occur (invalid bytes), decode with replacement fallback
+    try {
+        $reader = [System.IO.StreamReader]::new($InputPath, [System.Text.Encoding]::UTF8, $true)
         try {
             while ($null -ne ($line = $reader.ReadLine())) {
                 Process-Line $line
@@ -130,8 +131,24 @@ if ($InputPath) {
         } finally {
             $reader.Dispose()
         }
-    } finally {
-        $stream.Dispose()
+    } catch [System.Text.DecoderFallbackException] {
+        # Invalid byte sequences — read as bytes and decode with replacement fallback
+        $bytes = [System.IO.File]::ReadAllBytes($InputPath)
+        $enc = [System.Text.Encoding]::UTF8
+        $offset = 0
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            $enc = [System.Text.Encoding]::UTF8
+            $offset = 3
+        } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+            $enc = [System.Text.Encoding]::Unicode
+            $offset = 2
+        } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
+            $enc = [System.Text.Encoding]::BigEndianUnicode
+            $offset = 2
+        }
+        $enc = [System.Text.Encoding]::GetEncoding($enc.CodePage, $enc.EncoderFallback, [System.Text.DecoderReplacementFallback]::new('�'))
+        $text = $enc.GetString($bytes, $offset, $bytes.Length - $offset)
+        $text -split "`r?`n" | ForEach-Object { Process-Line $_ }
     }
 } else {
     $input | ForEach-Object { Process-Line $_ }
