@@ -101,7 +101,38 @@ if ($InputPath) {
         Write-Error "File not found: $InputPath"
         exit 1
     }
-    Get-Content -LiteralPath $InputPath | ForEach-Object { Process-Line $_ }
+    # Support binary/encoded files: detect BOM, use replacement fallback for invalid bytes
+    $stream = [System.IO.File]::OpenRead($InputPath)
+    try {
+        $bom = New-Object byte[] 4
+        $read = $stream.Read($bom, 0, 4)
+        $enc = [System.Text.Encoding]::UTF8
+        $offset = 0
+        if ($read -ge 3 -and $bom[0] -eq 0xEF -and $bom[1] -eq 0xBB -and $bom[2] -eq 0xBF) {
+            $enc = [System.Text.Encoding]::UTF8
+            $offset = 3
+        } elseif ($read -ge 2 -and $bom[0] -eq 0xFF -and $bom[1] -eq 0xFE) {
+            $enc = [System.Text.Encoding]::Unicode
+            $offset = 2
+        } elseif ($read -ge 2 -and $bom[0] -eq 0xFE -and $bom[1] -eq 0xFF) {
+            $enc = [System.Text.Encoding]::BigEndianUnicode
+            $offset = 2
+        } else {
+            $offset = 0
+        }
+        $stream.Position = $offset
+        $enc = [System.Text.Encoding]::GetEncoding($enc.CodePage, $enc.EncoderFallback, [System.Text.DecoderReplacementFallback]::new('�'))
+        $reader = [System.IO.StreamReader]::new($stream, $enc, $false, 1024, $true)
+        try {
+            while ($null -ne ($line = $reader.ReadLine())) {
+                Process-Line $line
+            }
+        } finally {
+            $reader.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
 } else {
     $input | ForEach-Object { Process-Line $_ }
 }
