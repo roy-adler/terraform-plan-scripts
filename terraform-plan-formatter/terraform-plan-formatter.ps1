@@ -9,15 +9,22 @@
 
 param(
     [Parameter(Position = 0)]
-    [string]$LogFile = ""
+    [string]$PathOrFullPath = "",
+    [Parameter(Position = 1)]
+    [string]$FileName = ""
 )
 
-if ($args.Count -gt 1) {
-    Write-Error "Usage: $MyInvocation.MyCommand.Name [logfile]"
+if ($args.Count -gt 0) {
+    Write-Error "Usage: $($MyInvocation.MyCommand.Name) [<full-path-and-filename>] | [<path> <filename>]"
     exit 1
 }
 
-$InputPath = $LogFile
+# One arg = full path+filename; two args = path + filename
+if ($FileName) {
+    $InputPath = Join-Path -Path $PathOrFullPath -ChildPath $FileName
+} else {
+    $InputPath = $PathOrFullPath
+}
 
 # Produce an ANSI/timestamp-free copy of a line for pattern matching only.
 # This is never used for output — only to detect state transitions reliably.
